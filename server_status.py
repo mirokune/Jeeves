@@ -392,7 +392,7 @@ class ServerStatusCog(commands.Cog):
         admin ran /skip, or AutoRestartCog is skipping it because the server
         rebooted too recently."""
         return (self.bot.state.skip_next_restart
-                or getattr(self.bot.state, 'boot_skip_active', False))
+                or getattr(self.bot.state, 'auto_skip_active', False))
 
     async def _get_channel(self):
         if self._channel:

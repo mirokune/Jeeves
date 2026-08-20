@@ -97,6 +97,10 @@ class Config:
         # 13:00 one. 0 disables the skip.
         self.RESTART_SKIP_WINDOW_MINUTES = _env_int('RESTART_SKIP_WINDOW_MINUTES', 120)
 
+        # Skip a scheduled restart this soon after a horde night ends, so
+        # players get time to collect their loot. 0 disables the skip.
+        self.HORDE_RESTART_GRACE_MINUTES = _env_int('HORDE_RESTART_GRACE_MINUTES', 60)
+
         # Roles
         self.DEFAULT_ROLE = _env('DEFAULT_ROLE', 'Admin')
         self.RANKS = {i: _env(f'RANK_{i}', f'Rank {i}') for i in range(1, 7)}
@@ -165,10 +169,10 @@ class ServerState:
         # When the bot last brought the server up. None means unknown — the
         # bot found it already running and cannot know its real boot time.
         self.last_boot_at: Optional[datetime.datetime] = None
-        # Set by AutoRestartCog when a scheduled restart is being skipped
-        # because the server booted too recently. Distinct from
-        # skip_next_restart, which is the admin's manual /skip.
-        self.boot_skip_active = False
+        # Set by AutoRestartCog when it is skipping a scheduled restart of
+        # its own accord — a recent reboot, or a horde night that just ended.
+        # Distinct from skip_next_restart, the admin's manual /skip.
+        self.auto_skip_active = False
         self.last_rcon_ok = False
         self.mod_update_running = False
 
