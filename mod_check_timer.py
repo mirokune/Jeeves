@@ -1,6 +1,10 @@
 """
 Mod Check Timer Extension
-Hourly mod update checks and crash detection.
+Periodic mod update checks and crash detection.
+
+The mod check interval comes from MOD_CHECK_INTERVAL (minutes, default 60).
+The decorator below cannot read config at class definition time, so the
+interval is applied with change_interval() before the loop starts.
 
 The crash monitor relies on bot.state.last_rcon_ok, which is written by
 the rcon_heartbeat loop below. Previously player_tracker kept this flag
@@ -32,28 +36,37 @@ class ModCheckCog(commands.Cog):
         self.bot = bot
         self.consecutive_failures = 0
         self.CRASH_THRESHOLD = 5      # 5 × 90 s ≈ 7.5 min of sustained RCON silence
-        self.hourly_mod_check.start()
+
+        interval = getattr(bot.config, 'MOD_CHECK_INTERVAL', 60)
+        if interval < 1:
+            print(f"[ModCheckCog] MOD_CHECK_INTERVAL={interval} is below the 1 minute "
+                  f"minimum — falling back to 60.")
+            interval = 60
+        self.mod_check_interval = interval
+        self.mod_check.change_interval(minutes=interval)
+
+        self.mod_check.start()
         self.rcon_heartbeat.start()
         self.crash_monitor.start()
 
     def cog_unload(self):
-        self.hourly_mod_check.cancel()
+        self.mod_check.cancel()
         self.rcon_heartbeat.cancel()
         self.crash_monitor.cancel()
 
     # ------------------------------------------------------------------ #
-    # Hourly mod check                                                     #
+    # Mod check — interval set from config in __init__                     #
     # ------------------------------------------------------------------ #
 
-    @tasks.loop(hours=1.0)
-    async def hourly_mod_check(self):
+    @tasks.loop(minutes=60.0)
+    async def mod_check(self):
         if self.bot.state.server_ready:
             await self.bot.handle_mod_updates()
 
-    @hourly_mod_check.before_loop
+    @mod_check.before_loop
     async def _before_mod_check(self):
         await self.bot.wait_until_ready()
-        await self._wait_for_server("mod check")
+        await self._wait_for_server(f"mod check (every {self.mod_check_interval}m)")
 
     # ------------------------------------------------------------------ #
     # RCON heartbeat — keeps bot.state.last_rcon_ok current               #

@@ -89,6 +89,18 @@ class Config:
         self.CHECK_INTERVAL = _env_int('CHECK_INTERVAL', 30)
         self.MONITOR_RETRIES = _env_int('MONITOR_RETRIES', 20)
 
+        # How often to check Workshop mods for updates.
+        self.MOD_CHECK_INTERVAL = _env_int('MOD_CHECK_INTERVAL', 60)
+
+        # Skip a scheduled restart when the server was rebooted this recently.
+        # A mod update restart at 12:30 should not be followed by the routine
+        # 13:00 one. 0 disables the skip.
+        self.RESTART_SKIP_WINDOW_MINUTES = _env_int('RESTART_SKIP_WINDOW_MINUTES', 120)
+
+        # Skip a scheduled restart this soon after a horde night ends, so
+        # players get time to collect their loot. 0 disables the skip.
+        self.HORDE_RESTART_GRACE_MINUTES = _env_int('HORDE_RESTART_GRACE_MINUTES', 60)
+
         # Roles
         self.DEFAULT_ROLE = _env('DEFAULT_ROLE', 'Admin')
         self.RANKS = {i: _env(f'RANK_{i}', f'Rank {i}') for i in range(1, 7)}
@@ -154,6 +166,13 @@ class ServerState:
         self.is_starting = False
         self.server_ready = False
         self.skip_next_restart = False
+        # When the bot last brought the server up. None means unknown — the
+        # bot found it already running and cannot know its real boot time.
+        self.last_boot_at: Optional[datetime.datetime] = None
+        # Set by AutoRestartCog when it is skipping a scheduled restart of
+        # its own accord — a recent reboot, or a horde night that just ended.
+        # Distinct from skip_next_restart, the admin's manual /skip.
+        self.auto_skip_active = False
         self.last_rcon_ok = False
         self.mod_update_running = False
 
@@ -600,6 +619,7 @@ class PZBot(commands.Bot):
                         await self.load_extension('mod_check_timer')
                 self.state.first_start = False
                 self.state.server_ready = True
+                self.state.last_boot_at = datetime.datetime.now(datetime.timezone.utc)
                 print("[ServerControl] server_ready = True")
                 return True
             if attempt < max_retries - 1:

@@ -176,6 +176,16 @@ If your server is heavily modded or has large maps, it may need more time to sta
 
 For a very large server with many mods and 16+ GB heap, you might want `STARTUP_WAIT=180` and `MONITOR_RETRIES=30`.
 
+### Restart and Mod Check Timing (Optional)
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `MOD_CHECK_INTERVAL` | `60` | Minutes between Workshop mod update checks |
+| `RESTART_SKIP_WINDOW_MINUTES` | `120` | Skip a scheduled restart if the server rebooted less than this many minutes before it. `0` always restarts on schedule |
+| `HORDE_RESTART_GRACE_MINUTES` | `60` | Skip a scheduled restart this many minutes after a horde night ends, so players can collect loot. `0` restarts as normal |
+
+`RESTART_SKIP_WINDOW_MINUTES` exists so a mod update restart isn't chased by the routine one an hour later. Only reboots the bot performed count — if the bot was started while the server was already running it has no way to know when that server booted, so the scheduled restart proceeds.
+
 ### Custom Emojis (Optional)
 
 By default, the bot uses standard Unicode emoji in its messages. If you want custom emoji (like the Project Zomboid Spiffo emotes), upload them to your Discord server, then add their IDs to config.env:
@@ -321,9 +331,13 @@ All slash commands require the role specified by `DEFAULT_ROLE` in your config u
 
 The bot restarts the server on a configurable UTC schedule (default: every 4 hours). Countdown warnings are broadcast in-game and to Discord at 10 minutes, 5 minutes, 1 minute, and 10 seconds before restart.
 
+A scheduled restart is skipped if the server was rebooted within the last `RESTART_SKIP_WINDOW_MINUTES` (default 120) — there's no sense rebooting for a mod update and then again forty minutes later. The decision is made at the 10 minute mark so the countdown never announces a restart that won't happen, and the status dashboard shows the restart as "Skipped".
+
+Restarts are also held off for `HORDE_RESTART_GRACE_MINUTES` (default 60) after a horde night ends. The bot already defers a restart that would land during a horde, but that deferral used to fire the restart about ten minutes after the event finished — precisely when players are still collecting their loot. Both the deferred restart and any scheduled slot inside the window are skipped, and the next slot picks it up. Mod update restarts are not affected: those still go ahead once the horde clears, since the server is running out-of-date mods until they do.
+
 ### Mod Update Detection
 
-Every hour, the bot checks all Workshop mods listed in your server's `.ini` file against Steam's API. If any mod has been updated, it triggers a restart countdown. No Steam API key is required — the bot uses Steam's public endpoint.
+Every `MOD_CHECK_INTERVAL` minutes (default 60), the bot checks all Workshop mods listed in your server's `.ini` file against Steam's API. If any mod has been updated, it triggers a restart countdown. No Steam API key is required — the bot uses Steam's public endpoint.
 
 ### Crash Detection
 

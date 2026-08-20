@@ -387,6 +387,13 @@ class ServerStatusCog(commands.Cog):
     def cog_unload(self):
         self.status_loop.cancel()
 
+    def _restart_skipped(self) -> bool:
+        """True when the next scheduled restart will not happen — either the
+        admin ran /skip, or AutoRestartCog is skipping it because the server
+        rebooted too recently."""
+        return (self.bot.state.skip_next_restart
+                or getattr(self.bot.state, 'auto_skip_active', False))
+
     async def _get_channel(self):
         if self._channel:
             return self._channel
@@ -466,7 +473,7 @@ class ServerStatusCog(commands.Cog):
 
                 embed = build_embed(True, world or self._last_world,
                                     horde or self._last_horde,
-                                    self.bot.state.skip_next_restart, stale=False,
+                                    self._restart_skipped(), stale=False,
                                     live_player_count=self.bot.state.player_count)
             elif bridge_fresh:
                 # RCON failed but bridge files are fresh — server is likely busy
@@ -478,20 +485,20 @@ class ServerStatusCog(commands.Cog):
 
                 embed = build_embed(True, world or self._last_world,
                                     horde or self._last_horde,
-                                    self.bot.state.skip_next_restart, stale=True,
+                                    self._restart_skipped(), stale=True,
                                     live_player_count=self.bot.state.player_count)
             elif self._rcon_fail_count < OFFLINE_GRACE_COUNT:
                 # RCON failed, bridge stale, but still within grace period
                 self._rcon_fail_count += 1
 
                 embed = build_embed(True, self._last_world, self._last_horde,
-                                    self.bot.state.skip_next_restart, stale=True,
+                                    self._restart_skipped(), stale=True,
                                     live_player_count=self.bot.state.player_count)
             else:
                 # Fully offline: RCON failed repeatedly, bridge stale
                 # Still show last known data rather than blanking
                 embed = build_embed(False, self._last_world, self._last_horde,
-                                    self.bot.state.skip_next_restart, stale=False,
+                                    self._restart_skipped(), stale=False,
                                     live_player_count=self.bot.state.player_count)
 
             await self._send_or_edit(embed)
