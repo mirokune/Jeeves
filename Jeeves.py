@@ -15,6 +15,22 @@ import time
 from pathlib import Path
 from typing import Optional, List, Dict
 
+# The bot prints emoji and em-dashes to the console. A real Windows console
+# window handles those fine, but the moment stdout is redirected — to a file,
+# a pipe, or a service wrapper such as NSSM or Task Scheduler — Python falls
+# back to the locale encoding (cp1252 here) and every one of them raises
+# UnicodeEncodeError. That kills the process at startup on the config banner
+# below, and stops the mod check loop dead on its first run.
+#
+# errors='replace' is the part that matters: unencodable characters become '?'
+# instead of an exception. Unnecessary from Python 3.15, where UTF-8 mode is
+# the default.
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding='utf-8', errors='replace')
+    except (AttributeError, OSError, ValueError):
+        pass  # not a reconfigurable stream (already wrapped, or closed)
+
 try:
     from dotenv import load_dotenv
     # When compiled with PyInstaller, __file__ is inside _internal/.
