@@ -161,11 +161,26 @@ def _build_leaderboard_embed(survivor_data: dict | None, horde_data: dict | None
 # Cog
 # ============================================================================
 
+def _env_channel_id(name: str) -> int:
+    """Read a Discord channel ID from the environment.
+
+    Returns 0 when unset or when the value is a placeholder / non-numeric,
+    so a bad config disables the feature instead of raising at load time.
+    """
+    raw = (os.getenv(name) or '').strip()
+    try:
+        return int(raw)
+    except ValueError:
+        if raw:
+            print(f"[Config] {name}='{raw}' is not a channel ID — feature disabled.")
+        return 0
+
+
 class HordeLeaderboardCog(commands.Cog):
 
     def __init__(self, bot):
         self.bot = bot
-        self._channel_id = int(os.getenv('HORDE_LEADERBOARD_CHANNEL_ID', '0'))
+        self._channel_id = _env_channel_id('HORDE_LEADERBOARD_CHANNEL_ID')
         self._message_id = None
         self._channel = None
 

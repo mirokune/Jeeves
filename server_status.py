@@ -25,6 +25,7 @@ Config:
 import os
 import sys
 import time
+import asyncio
 import datetime
 import discord
 from discord.ext import commands, tasks
@@ -63,6 +64,12 @@ OFFLINE_GRACE_COUNT = 3
 # (i.e., the server was writing data recently even if RCON timed out)
 BRIDGE_FRESHNESS_SECONDS = 120
 
+# How old (seconds) world data can be before the dashboard stops presenting it
+# as live. Deliberately much looser than BRIDGE_FRESHNESS_SECONDS so a slow
+# writer isn't mistaken for a dead one — but with an in-game day lasting about
+# an hour, anything older than this is a stopped bridge, not a late update.
+WORLD_STALE_SECONDS = 900
+
 # ============================================================================
 # Data helpers
 # ============================================================================
@@ -99,6 +106,32 @@ def _temp_f(celsius):
     return f"{celsius * 9 / 5 + 32:.0f}\u00b0F"
 
 
+def _data_age(data):
+    """Seconds since a Lua bridge dict was written, or None if unknown."""
+    if not data:
+        return None
+    ts = data.get("timestamp")
+    if ts is None:
+        return None
+    try:
+        return time.time() - float(ts)
+    except (TypeError, ValueError):
+        return None
+
+
+def _format_age(seconds):
+    """Human-readable age for the stale-bridge warning."""
+    if seconds is None:
+        return "unknown"
+    if seconds < 90:
+        return f"{int(seconds)}s"
+    if seconds < 5400:
+        return f"{int(seconds // 60)}m"
+    if seconds < 172800:
+        return f"{int(seconds // 3600)}h"
+    return f"{int(seconds // 86400)}d"
+
+
 def _bridge_file_is_fresh(data, max_age=BRIDGE_FRESHNESS_SECONDS):
     """Check if a Lua bridge dict has a recent timestamp."""
     if not data:
@@ -117,7 +150,8 @@ def _bridge_file_is_fresh(data, max_age=BRIDGE_FRESHNESS_SECONDS):
 # Embed builder
 # ============================================================================
 
-def build_embed(server_online, world, horde, skip_active, stale=False):
+def build_embed(server_online, world, horde, skip_active, stale=False,
+                live_player_count=None):
     """Build the status dashboard embed.
 
     Args:
@@ -127,7 +161,23 @@ def build_embed(server_online, world, horde, skip_active, stale=False):
         skip_active: Whether next restart is being skipped.
         stale: If True, data is cached from a previous poll (server may be
                temporarily unreachable but we're within the grace period).
+        live_player_count: Player count from RCON, used when the world bridge
+               data is too old to trust.
     """
+
+    # World data is only presented as live when the mod wrote it recently.
+    # Without this the panel happily renders a months-old snapshot as the
+    # current in-game time, date and weather.
+    world_age = _data_age(world)
+    world_fresh = bool(world) and world_age is not None and world_age < WORLD_STALE_SECONDS
+
+    # ...except when the server is online and empty. With PauseEmpty the
+    # simulation halts, OnTick stops firing and the mod stops writing — so the
+    # last values are not stale, they are the frozen present. Show them, and
+    # say the world is paused rather than crying broken bridge.
+    world_paused = (bool(world) and not world_fresh and server_online
+                    and live_player_count == 0)
+    world_live = world_fresh or world_paused
 
     if server_online and not stale:
         embed = discord.Embed(colour=discord.Colour.green())
@@ -154,41 +204,55 @@ def build_embed(server_online, world, horde, skip_active, stale=False):
     else:
         embed.add_field(name="\U0001f4e1 Status", value="\U0001f534 Offline", inline=True)
 
-    player_count = "0"
-    if world and world.get("playerCount") is not None:
+    if world_fresh and world.get("playerCount") is not None:
         player_count = str(world["playerCount"])
+    elif live_player_count is not None:
+        player_count = str(live_player_count)
+    else:
+        player_count = "0"
     embed.add_field(name="\u2b50 Players", value=player_count, inline=True)
 
     restart_str = _next_restart_str(skip_active)
     embed.add_field(name="\u23f0 Restart", value=restart_str, inline=True)
 
     # --- Row 2: Time | Date | Age ---
-    if world:
+    if world_live:
         hour = world.get("hour", 0)
         mins = world.get("minutes", 0)
         is_night = world.get("isNight", False)
         time_icon = "\U0001f319" if is_night else "\u2600\ufe0f"
         embed.add_field(name=f"{time_icon} Time", value=_format_time(hour, mins), inline=True)
 
-        month = world.get("month", 0)
-        day = world.get("day", 1)
-        month_name = MONTH_NAMES[month][:3] if 0 <= month < 12 else "???"
-        embed.add_field(name="\U0001f4c5 Date", value=f"{month_name} {day}", inline=True)
-
-        age_raw = world.get("worldAgeDays", 0)
-        elapsed = world.get("elapsedDays", 0)
-        if elapsed and elapsed > 0:
-            age = int(elapsed)
-        elif age_raw >= 1:
-            age = int(age_raw)
+        # PZ's GameTime getDay()/getMonth() are both zero-based, and the mod
+        # passes them through untouched. The month lookup already accounts for
+        # that; the day has to be shifted to match the in-game calendar.
+        month = world.get("month")
+        day = world.get("day")
+        if month is None or day is None:
+            date_str = "\u2014"
         else:
-            age = max(1, int(age_raw))
-        embed.add_field(name="\U0001f4c6 Age", value=f"Day {age}", inline=True)
+            month_name = MONTH_NAMES[month][:3] if 0 <= month < 12 else "???"
+            date_str = f"{month_name} {int(day) + 1}"
+        embed.add_field(name="\U0001f4c5 Date", value=date_str, inline=True)
+
+        # Age comes from whichever day counter the mod reports. If neither is
+        # present, show a dash — inventing "Day 1" hides a broken bridge file.
+        elapsed = world.get("elapsedDays")
+        age_raw = world.get("worldAgeDays")
+        if elapsed is not None and elapsed > 0:
+            age_str = f"Day {int(elapsed) + 1}"
+        elif age_raw is not None and age_raw > 0:
+            age_str = f"Day {int(age_raw) + 1}"
+        else:
+            age_str = "\u2014"
+        embed.add_field(name="\U0001f4c6 Age", value=age_str, inline=True)
     else:
-        embed.add_field(name="\U0001f30d World", value="Waiting...", inline=False)
+        embed.add_field(name="\U0001f552 Time", value="\u2014", inline=True)
+        embed.add_field(name="\U0001f4c5 Date", value="\u2014", inline=True)
+        embed.add_field(name="\U0001f4c6 Age", value="\u2014", inline=True)
 
     # --- Row 3: Weather | Wind | Cycle ---
-    if world:
+    if world_live:
         weather = world.get("weather", "Clear")
         temp = world.get("temperature", 0)
         w_emoji = WEATHER_EMOJI.get(weather, "\u2600\ufe0f")
@@ -211,9 +275,9 @@ def build_embed(server_online, world, horde, skip_active, stale=False):
         else:
             embed.add_field(name="\u2600\ufe0f Cycle", value="Day", inline=True)
     else:
-        embed.add_field(name="\u2601\ufe0f Weather", value="Waiting...", inline=True)
-        embed.add_field(name="\u200b", value="\u200b", inline=True)
-        embed.add_field(name="\u200b", value="\u200b", inline=True)
+        embed.add_field(name="\u2601\ufe0f Weather", value="\u2014", inline=True)
+        embed.add_field(name="\U0001f4a8 Wind", value="\u2014", inline=True)
+        embed.add_field(name="\u2600\ufe0f Cycle", value="\u2014", inline=True)
 
     # --- Row 4: Horde Day | Horde Status | Completed ---
     horde_day, horde_status, horde_completed = _horde_fields(horde)
@@ -221,8 +285,23 @@ def build_embed(server_online, world, horde, skip_active, stale=False):
     embed.add_field(name="\U0001f9df Status", value=horde_status, inline=True)
     embed.add_field(name="\U0001f3c6 Completed", value=horde_completed, inline=True)
 
+    if not world_live:
+        if world:
+            detail = f"No update in {_format_age(world_age)}"
+        else:
+            detail = "File missing"
+        embed.add_field(
+            name="\u26a0\ufe0f World Bridge",
+            value=(f"{detail} — the Jeeves server mod isn't writing "
+                   f"`{lua_bridge.WORLD_STATUS_FILE}.txt`, so in-game time, "
+                   f"date and weather are unavailable."),
+            inline=False,
+        )
+
     footer = "Updates every 30 seconds"
-    if stale:
+    if world_paused:
+        footer = "Updates every 30 seconds \u2022 World paused \u2014 no players online"
+    elif stale:
         footer = "Updates every 30 seconds \u2022 Data may be stale"
     embed.set_footer(text=footer)
     embed.timestamp = datetime.datetime.now(datetime.timezone.utc)
@@ -269,11 +348,26 @@ def _horde_fields(horde):
 # Discord Cog
 # ============================================================================
 
+def _env_channel_id(name: str) -> int:
+    """Read a Discord channel ID from the environment.
+
+    Returns 0 when unset or when the value is a placeholder / non-numeric,
+    so a bad config disables the feature instead of raising at load time.
+    """
+    raw = (os.getenv(name) or '').strip()
+    try:
+        return int(raw)
+    except ValueError:
+        if raw:
+            print(f"[Config] {name}='{raw}' is not a channel ID — feature disabled.")
+        return 0
+
+
 class ServerStatusCog(commands.Cog):
 
     def __init__(self, bot):
         self.bot = bot
-        self._channel_id = int(os.getenv('STATUS_CHANNEL_ID', '0'))
+        self._channel_id = _env_channel_id('STATUS_CHANNEL_ID')
         self._message_id = None
         self._channel = None
 
@@ -347,7 +441,11 @@ class ServerStatusCog(commands.Cog):
     async def status_loop(self):
         try:
             # --- 1. Probe RCON ---
-            rcon_ok = self.bot.state.server_ready and self.bot.rcon.is_server_online()
+            # is_server_online() is a blocking socket call (up to 5s), so run it
+            # off the event loop — otherwise every tick stalls chat relay,
+            # slash commands and the gateway heartbeat.
+            rcon_ok = self.bot.state.server_ready and await asyncio.to_thread(
+                self.bot.rcon.is_server_online)
 
             # --- 2. Read Lua bridge files ---
             world = lua_bridge.read_world_status()
@@ -368,7 +466,8 @@ class ServerStatusCog(commands.Cog):
 
                 embed = build_embed(True, world or self._last_world,
                                     horde or self._last_horde,
-                                    self.bot.state.skip_next_restart, stale=False)
+                                    self.bot.state.skip_next_restart, stale=False,
+                                    live_player_count=self.bot.state.player_count)
             elif bridge_fresh:
                 # RCON failed but bridge files are fresh — server is likely busy
                 self._rcon_fail_count += 1
@@ -379,18 +478,21 @@ class ServerStatusCog(commands.Cog):
 
                 embed = build_embed(True, world or self._last_world,
                                     horde or self._last_horde,
-                                    self.bot.state.skip_next_restart, stale=True)
+                                    self.bot.state.skip_next_restart, stale=True,
+                                    live_player_count=self.bot.state.player_count)
             elif self._rcon_fail_count < OFFLINE_GRACE_COUNT:
                 # RCON failed, bridge stale, but still within grace period
                 self._rcon_fail_count += 1
 
                 embed = build_embed(True, self._last_world, self._last_horde,
-                                    self.bot.state.skip_next_restart, stale=True)
+                                    self.bot.state.skip_next_restart, stale=True,
+                                    live_player_count=self.bot.state.player_count)
             else:
                 # Fully offline: RCON failed repeatedly, bridge stale
                 # Still show last known data rather than blanking
                 embed = build_embed(False, self._last_world, self._last_horde,
-                                    self.bot.state.skip_next_restart, stale=False)
+                                    self.bot.state.skip_next_restart, stale=False,
+                                    live_player_count=self.bot.state.player_count)
 
             await self._send_or_edit(embed)
 
@@ -400,7 +502,6 @@ class ServerStatusCog(commands.Cog):
     @status_loop.before_loop
     async def _before_status(self):
         await self.bot.wait_until_ready()
-        import asyncio
         await asyncio.sleep(5)
         print("[ServerStatus] Dashboard started")
 

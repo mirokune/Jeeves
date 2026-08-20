@@ -63,12 +63,27 @@ def strip_rgb_tags(text: str) -> str:
     return text.strip()
 
 
+def _env_channel_id(name: str) -> int:
+    """Read a Discord channel ID from the environment.
+
+    Returns 0 when unset or when the value is a placeholder / non-numeric,
+    so a bad config disables the feature instead of raising at load time.
+    """
+    raw = (os.getenv(name) or '').strip()
+    try:
+        return int(raw)
+    except ValueError:
+        if raw:
+            print(f"[Config] {name}='{raw}' is not a channel ID — feature disabled.")
+        return 0
+
+
 class ChatRelay(commands.Cog):
     """Relays chat between PZ server and Discord."""
 
     def __init__(self, bot: commands.Bot):
         self.bot = bot
-        self._channel_id = int(os.getenv('CHAT_RELAY_CHANNEL_ID', '0'))
+        self._channel_id = _env_channel_id('CHAT_RELAY_CHANNEL_ID')
         self._log_path = os.getenv(
             'CHAT_LOG_PATH',
             ''
