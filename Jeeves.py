@@ -67,6 +67,9 @@ def _env(key: str, default: str = '') -> str:
 def _env_int(key: str, default: int = 0) -> int:
     return int(os.getenv(key, str(default)))
 
+def _env_float(key: str, default: float = 0.0) -> float:
+    return float(os.getenv(key, str(default)))
+
 
 class Config:
     """Server and bot configuration settings."""
@@ -88,6 +91,14 @@ class Config:
         self.STARTUP_WAIT = _env_int('STARTUP_WAIT', 120)
         self.CHECK_INTERVAL = _env_int('CHECK_INTERVAL', 30)
         self.MONITOR_RETRIES = _env_int('MONITOR_RETRIES', 20)
+
+        # How often to check Workshop mods for updates.
+        self.MOD_CHECK_INTERVAL = _env_int('MOD_CHECK_INTERVAL', 60)
+
+        # Skip a scheduled restart when the server was rebooted this recently.
+        # A mod update restart at 12:30 should not be followed by the routine
+        # 13:00 one. 0 disables the skip.
+        self.RESTART_SKIP_WINDOW = _env_float('RESTART_SKIP_WINDOW_HOURS', 2.0)
 
         # Roles
         self.DEFAULT_ROLE = _env('DEFAULT_ROLE', 'Admin')
@@ -154,6 +165,13 @@ class ServerState:
         self.is_starting = False
         self.server_ready = False
         self.skip_next_restart = False
+        # When the bot last brought the server up. None means unknown — the
+        # bot found it already running and cannot know its real boot time.
+        self.last_boot_at: Optional[datetime.datetime] = None
+        # Set by AutoRestartCog when a scheduled restart is being skipped
+        # because the server booted too recently. Distinct from
+        # skip_next_restart, which is the admin's manual /skip.
+        self.boot_skip_active = False
         self.last_rcon_ok = False
         self.mod_update_running = False
 
@@ -600,6 +618,7 @@ class PZBot(commands.Bot):
                         await self.load_extension('mod_check_timer')
                 self.state.first_start = False
                 self.state.server_ready = True
+                self.state.last_boot_at = datetime.datetime.now(datetime.timezone.utc)
                 print("[ServerControl] server_ready = True")
                 return True
             if attempt < max_retries - 1:

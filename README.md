@@ -176,6 +176,15 @@ If your server is heavily modded or has large maps, it may need more time to sta
 
 For a very large server with many mods and 16+ GB heap, you might want `STARTUP_WAIT=180` and `MONITOR_RETRIES=30`.
 
+### Restart and Mod Check Timing (Optional)
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `MOD_CHECK_INTERVAL` | `60` | Minutes between Workshop mod update checks |
+| `RESTART_SKIP_WINDOW_HOURS` | `2` | Skip a scheduled restart if the server rebooted less than this many hours before it. Accepts decimals (`0.5` = 30 minutes); `0` always restarts on schedule |
+
+`RESTART_SKIP_WINDOW_HOURS` exists so a mod update restart isn't chased by the routine one an hour later. Only reboots the bot performed count — if the bot was started while the server was already running it has no way to know when that server booted, so the scheduled restart proceeds.
+
 ### Custom Emojis (Optional)
 
 By default, the bot uses standard Unicode emoji in its messages. If you want custom emoji (like the Project Zomboid Spiffo emotes), upload them to your Discord server, then add their IDs to config.env:
@@ -321,9 +330,11 @@ All slash commands require the role specified by `DEFAULT_ROLE` in your config u
 
 The bot restarts the server on a configurable UTC schedule (default: every 4 hours). Countdown warnings are broadcast in-game and to Discord at 10 minutes, 5 minutes, 1 minute, and 10 seconds before restart.
 
+A scheduled restart is skipped if the server was rebooted within the last `RESTART_SKIP_WINDOW_HOURS` (default 2) — there's no sense rebooting for a mod update and then again forty minutes later. The decision is made at the 10 minute mark so the countdown never announces a restart that won't happen, and the status dashboard shows the restart as "Skipped".
+
 ### Mod Update Detection
 
-Every hour, the bot checks all Workshop mods listed in your server's `.ini` file against Steam's API. If any mod has been updated, it triggers a restart countdown. No Steam API key is required — the bot uses Steam's public endpoint.
+Every `MOD_CHECK_INTERVAL` minutes (default 60), the bot checks all Workshop mods listed in your server's `.ini` file against Steam's API. If any mod has been updated, it triggers a restart countdown. No Steam API key is required — the bot uses Steam's public endpoint.
 
 ### Crash Detection
 

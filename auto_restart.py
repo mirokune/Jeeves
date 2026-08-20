@@ -1,6 +1,12 @@
 """
 Auto Restart Extension
 Handles scheduled server restarts with countdown notifications.
+
+A scheduled restart is skipped when the server was rebooted less than
+RESTART_SKIP_WINDOW_HOURS ago — a mod update at 12:30 should not be chased
+by the routine 13:00 restart. The decision is made at the 10 minute mark so
+the countdown never announces a restart that will not happen, and re-checked
+on the hour in case the bot was not running at the 10 minute mark.
 """
 
 import datetime
@@ -20,6 +26,17 @@ RESTART_HOURS = [1, 5, 9, 13, 17, 21]
 NOTIFY_HOURS = [0, 4, 8, 12, 16, 20]
 
 
+def _format_delta(delta: datetime.timedelta) -> str:
+    """Human-readable age for the skip notice."""
+    minutes = int(delta.total_seconds() // 60)
+    if minutes < 60:
+        return f"{minutes}m"
+    hours, minutes = divmod(minutes, 60)
+    if minutes:
+        return f"{hours}h {minutes}m"
+    return f"{hours}h"
+
+
 class AutoRestartCog(commands.Cog):
 
     def __init__(self, bot):
@@ -32,10 +49,49 @@ class AutoRestartCog(commands.Cog):
         for task in (self.auto_restart, self.notify_10m, self.notify_5m, self.notify_1m, self.notify_10s):
             task.cancel()
 
+    # ---- Recent-boot skip ----
+
+    def _recent_boot_reason(self):
+        """Why this scheduled restart should be skipped, or None to proceed.
+
+        Only bot-initiated boots count: last_boot_at is None when the bot
+        found the server already running, and inventing a boot time there
+        would suppress a legitimate restart.
+        """
+        window_hours = getattr(self.bot.config, 'RESTART_SKIP_WINDOW', 0)
+        if window_hours <= 0:
+            return None
+
+        booted = self.bot.state.last_boot_at
+        if booted is None:
+            return None
+
+        since = datetime.datetime.now(UTC) - booted
+        if since >= datetime.timedelta(hours=window_hours):
+            return None
+
+        return (f"the server was rebooted {_format_delta(since)} ago, "
+                f"within the {_format_delta(datetime.timedelta(hours=window_hours))} "
+                f"restart skip window")
+
     # ---- Scheduled tasks ----
 
     @tasks.loop(time=_schedule(RESTART_HOURS, minute=0))
     async def auto_restart(self):
+        # Decided at the 10 minute mark, but re-checked here so a bot that
+        # was not running then still honours the window.
+        reason = self._recent_boot_reason()
+        if self.bot.state.boot_skip_active or reason:
+            import discord
+            self.bot.state.boot_skip_active = False
+            detail = reason or "the server was rebooted recently"
+            await self.bot.send_notification(
+                f"{self.bot.Emojis.JEEVES} Scheduled restart skipped \u2014 {detail}.",
+                discord.Colour.yellow()
+            )
+            print(f"[AutoRestart] Restart skipped: {detail}")
+            return
+
         if self.bot.state.skip_next_restart:
             import discord
             self.bot.state.skip_next_restart = False
@@ -81,6 +137,19 @@ class AutoRestartCog(commands.Cog):
     async def notify_10m(self):
         if self.bot.state.skip_next_restart:
             return
+
+        # Decide before announcing anything: a countdown for a restart that
+        # will not happen is worse than no countdown at all.
+        reason = self._recent_boot_reason()
+        if reason:
+            import discord
+            self.bot.state.boot_skip_active = True
+            print(f"[AutoRestart] Skipping upcoming restart: {reason}")
+            await self.bot.send_notification(
+                f"{self.bot.Emojis.JEEVES} Next scheduled restart will be skipped \u2014 {reason}.",
+                discord.Colour.yellow()
+            )
+            return
         # Horde guard: check current AND projected in-game time.
         # With 1 day = 2 hours, 10 real minutes = 2 in-game hours.
         # If a horde is active or the window will be active at restart
@@ -103,17 +172,20 @@ class AutoRestartCog(commands.Cog):
 
     @tasks.loop(time=_schedule(NOTIFY_HOURS, minute=55))
     async def notify_5m(self):
-        if not self.bot.state.skip_next_restart and not self._horde_defer_active:
+        if (not self.bot.state.skip_next_restart and not self._horde_defer_active
+                and not self.bot.state.boot_skip_active):
             await self._announce("5 Minutes", self.bot.Emojis.SPIFFO_EDUCATE)
 
     @tasks.loop(time=_schedule(NOTIFY_HOURS, minute=59))
     async def notify_1m(self):
-        if not self.bot.state.skip_next_restart and not self._horde_defer_active:
+        if (not self.bot.state.skip_next_restart and not self._horde_defer_active
+                and not self.bot.state.boot_skip_active):
             await self._announce("1 Minute", self.bot.Emojis.SPIFFO_KATANA)
 
     @tasks.loop(time=_schedule(NOTIFY_HOURS, minute=59, second=50))
     async def notify_10s(self):
-        if not self.bot.state.skip_next_restart and not self._horde_defer_active:
+        if (not self.bot.state.skip_next_restart and not self._horde_defer_active
+                and not self.bot.state.boot_skip_active):
             await self._announce("10 Seconds", self.bot.Emojis.SPIFFO_STOP)
 
     async def _announce(self, label: str, emoji: str):
