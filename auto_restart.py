@@ -3,7 +3,7 @@ Auto Restart Extension
 Handles scheduled server restarts with countdown notifications.
 
 A scheduled restart is skipped when the server was rebooted less than
-RESTART_SKIP_WINDOW_HOURS ago — a mod update at 12:30 should not be chased
+RESTART_SKIP_WINDOW_MINUTES ago — a mod update at 12:30 should not be chased
 by the routine 13:00 restart. The decision is made at the 10 minute mark so
 the countdown never announces a restart that will not happen, and re-checked
 on the hour in case the bot was not running at the 10 minute mark.
@@ -58,21 +58,21 @@ class AutoRestartCog(commands.Cog):
         found the server already running, and inventing a boot time there
         would suppress a legitimate restart.
         """
-        window_hours = getattr(self.bot.config, 'RESTART_SKIP_WINDOW', 0)
-        if window_hours <= 0:
+        window_minutes = getattr(self.bot.config, 'RESTART_SKIP_WINDOW_MINUTES', 0)
+        if window_minutes <= 0:
             return None
 
         booted = self.bot.state.last_boot_at
         if booted is None:
             return None
 
+        window = datetime.timedelta(minutes=window_minutes)
         since = datetime.datetime.now(UTC) - booted
-        if since >= datetime.timedelta(hours=window_hours):
+        if since >= window:
             return None
 
         return (f"the server was rebooted {_format_delta(since)} ago, "
-                f"within the {_format_delta(datetime.timedelta(hours=window_hours))} "
-                f"restart skip window")
+                f"within the {_format_delta(window)} restart skip window")
 
     # ---- Scheduled tasks ----
 

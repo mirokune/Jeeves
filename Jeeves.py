@@ -67,9 +67,6 @@ def _env(key: str, default: str = '') -> str:
 def _env_int(key: str, default: int = 0) -> int:
     return int(os.getenv(key, str(default)))
 
-def _env_float(key: str, default: float = 0.0) -> float:
-    return float(os.getenv(key, str(default)))
-
 
 class Config:
     """Server and bot configuration settings."""
@@ -98,7 +95,7 @@ class Config:
         # Skip a scheduled restart when the server was rebooted this recently.
         # A mod update restart at 12:30 should not be followed by the routine
         # 13:00 one. 0 disables the skip.
-        self.RESTART_SKIP_WINDOW = _env_float('RESTART_SKIP_WINDOW_HOURS', 2.0)
+        self.RESTART_SKIP_WINDOW_MINUTES = _env_int('RESTART_SKIP_WINDOW_MINUTES', 120)
 
         # Roles
         self.DEFAULT_ROLE = _env('DEFAULT_ROLE', 'Admin')
