@@ -16,6 +16,11 @@ dist/
 *.db
 rank_links.json
 mod_update_log.json
+logs/
+# Lua bridge files live in the server's Zomboid folder. A stray ./Lua appears
+# when the bot runs somewhere the Windows SERVER_INI_PATH can't be resolved
+# (e.g. under WSL), where it collapses to a relative path.
+Lua/
 
 # IDE
 .vscode/
