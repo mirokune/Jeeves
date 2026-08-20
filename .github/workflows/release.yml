@@ -1,0 +1,100 @@
+name: Build and Release
+
+# Tag a commit to publish: git tag v1.2.0 && git push origin v1.2.0
+# Run manually from the Actions tab to build without releasing — the zip is
+# attached to the run as an artifact.
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+defaults:
+  run:
+    shell: pwsh
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+
+      # Cogs are loaded by name at runtime, so a syntax error or bad import in
+      # one of them would otherwise only surface when the bot is already live.
+      - name: Import every module
+        run: |
+          $modules = Get-ChildItem *.py -Exclude Jeeves.py | ForEach-Object { $_.BaseName }
+          foreach ($m in $modules) {
+            python -c "import $m"
+            if ($LASTEXITCODE -ne 0) { throw "$m failed to import" }
+          }
+          Write-Host "OK: $($modules.Count) modules import cleanly"
+
+      - name: Build
+        run: python -m PyInstaller Jeeves.spec --noconfirm --clean
+
+      # The horde leaderboard was missing from the exe for months because it
+      # was absent from the spec's hidden imports. Nothing failed at build
+      # time — it only showed up as "Extension could not be loaded or found"
+      # once the bot was running. Check the bundle instead of trusting it.
+      - name: Verify every module reached the bundle
+        run: |
+          $toc = 'build/Jeeves/PYZ-00.toc'
+          if (-not (Test-Path $toc)) { throw "$toc not found — did the build layout change?" }
+          $contents = [System.Text.Encoding]::Latin1.GetString([System.IO.File]::ReadAllBytes($toc))
+          $missing = Get-ChildItem *.py -Exclude Jeeves.py |
+                     ForEach-Object { $_.BaseName } |
+                     Where-Object { -not $contents.Contains($_) }
+          if ($missing) { throw "missing from the bundle: $($missing -join ', ')" }
+          Write-Host "OK: every module is in the frozen bundle"
+
+      # Launching with no config.env exits 1 on the validation banner, which
+      # is far enough in to prove the bundle actually runs: the interpreter
+      # starts, discord.py and its TLS stack import, and stdout survives being
+      # redirected. A build missing its OpenSSL DLLs dies well before this.
+      - name: Smoke test the exe
+        run: |
+          Push-Location dist/Jeeves
+          $out = & ./Jeeves.exe 2>&1 | Out-String
+          $code = $LASTEXITCODE
+          Pop-Location
+          Write-Host $out
+          if ($code -ne 1) { throw "expected exit 1 from config validation, got $code" }
+          if ($out -notmatch 'DISCORD_TOKEN is not set') { throw "did not reach config validation" }
+          Write-Host "OK: the exe starts and reaches config validation"
+
+      - name: Package
+        id: package
+        run: |
+          Copy-Item config.env.example dist/Jeeves/config.env.example -Force
+          $name = "Jeeves-$($env:GITHUB_REF_NAME)-win64.zip"
+          Compress-Archive -Path dist/Jeeves/* -DestinationPath $name
+          "zip=$name" >> $env:GITHUB_OUTPUT
+          Write-Host "packaged $name"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Jeeves-win64
+          path: ${{ steps.package.outputs.zip }}
+
+      - name: Publish release
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$env:GITHUB_REF_NAME" "${{ steps.package.outputs.zip }}" `
+            --title "$env:GITHUB_REF_NAME" `
+            --generate-notes

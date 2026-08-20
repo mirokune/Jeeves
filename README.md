@@ -85,10 +85,15 @@ You need two Discord IDs for the configuration:
 
 ### Option A: Pre-Built Executable (Windows — Recommended)
 
-1. Extract the `Jeeves` folder to a location on your server machine
-2. Copy `config.env.example` to `config.env`
-3. Edit `config.env` with your settings (see [Configuration](#configuration))
-4. Run `Jeeves.exe`
+1. Download the latest `Jeeves-vX.Y.Z-win64.zip` from [Releases](../../releases)
+2. Extract it to a location on your server machine
+3. Copy `config.env.example` to `config.env`
+4. Edit `config.env` with your settings (see [Configuration](#configuration))
+5. Run `Jeeves.exe`
+
+Keep `Jeeves.exe` and the `_internal` folder together — the exe will not start
+without it. When upgrading, replace the whole extracted folder rather than
+copying the new exe over an old `_internal`, and keep your `config.env`.
 
 ### Option B: Running from Source (Windows)
 
@@ -369,6 +374,28 @@ JeevesBot is one part of the Jeeves server management suite. Each component work
 - **Jeeve's Journals** — Skill recovery journals for preserving progress across deaths
 
 ---
+
+## Releases
+
+Windows builds are produced by GitHub Actions (`.github/workflows/release.yml`)
+and attached to [Releases](../../releases) — the exe is not committed to the
+repository.
+
+To publish a new build:
+
+```bash
+git tag v1.2.0
+git push origin v1.2.0
+```
+
+The workflow builds on `windows-latest`, then refuses to publish unless three
+checks pass: every top-level module imports, every module is present in the
+frozen bundle, and the built exe starts and reaches config validation. Those
+exist because a cog once went missing from the bundle for months — nothing
+failed at build time, it just never loaded at runtime.
+
+Running the workflow manually from the Actions tab builds and runs the same
+checks without publishing, attaching the zip to the run instead.
 
 ## Building from Source
 

@@ -10,6 +10,10 @@ __pycache__/
 build/
 dist/
 *.spec.bak
+# Build output. Released as a zip on GitHub Releases by
+# .github/workflows/release.yml, not committed — see the README.
+/Jeeves.exe
+/_internal/
 
 # Runtime data
 *.lock
