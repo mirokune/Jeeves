@@ -169,7 +169,15 @@ def build_embed(server_online, world, horde, skip_active, stale=False,
     # Without this the panel happily renders a months-old snapshot as the
     # current in-game time, date and weather.
     world_age = _data_age(world)
-    world_live = bool(world) and world_age is not None and world_age < WORLD_STALE_SECONDS
+    world_fresh = bool(world) and world_age is not None and world_age < WORLD_STALE_SECONDS
+
+    # ...except when the server is online and empty. With PauseEmpty the
+    # simulation halts, OnTick stops firing and the mod stops writing — so the
+    # last values are not stale, they are the frozen present. Show them, and
+    # say the world is paused rather than crying broken bridge.
+    world_paused = (bool(world) and not world_fresh and server_online
+                    and live_player_count == 0)
+    world_live = world_fresh or world_paused
 
     if server_online and not stale:
         embed = discord.Embed(colour=discord.Colour.green())
@@ -196,7 +204,7 @@ def build_embed(server_online, world, horde, skip_active, stale=False,
     else:
         embed.add_field(name="\U0001f4e1 Status", value="\U0001f534 Offline", inline=True)
 
-    if world_live and world.get("playerCount") is not None:
+    if world_fresh and world.get("playerCount") is not None:
         player_count = str(world["playerCount"])
     elif live_player_count is not None:
         player_count = str(live_player_count)
@@ -291,7 +299,9 @@ def build_embed(server_online, world, horde, skip_active, stale=False,
         )
 
     footer = "Updates every 30 seconds"
-    if stale:
+    if world_paused:
+        footer = "Updates every 30 seconds \u2022 World paused \u2014 no players online"
+    elif stale:
         footer = "Updates every 30 seconds \u2022 Data may be stale"
     embed.set_footer(text=footer)
     embed.timestamp = datetime.datetime.now(datetime.timezone.utc)
