@@ -5,9 +5,9 @@ The bot writes command files to the Zomboid/Lua/ directory and the
 JeevesIntegration server mod polls for them.
 
 Two command files to avoid queueing delays:
-  jeeves_commands.lua  — General commands (broadcast sounds, playsound,
+  jeeves_commands.txt  — General commands (broadcast sounds, playsound,
                          rankpush, horde, etc.)
-  jeeves_chat.lua      — Dedicated chat relay file. Discord messages are
+  jeeves_chat.txt      — Dedicated chat relay file. Discord messages are
                          written here so they never queue behind broadcasts.
 
 Architecture:
@@ -37,9 +37,13 @@ _chat_id: int = 0
 _write_lock = asyncio.Lock()
 _chat_lock = asyncio.Lock()
 
-# Filenames the Jeeves Integration mod watches for
-COMMAND_FILE = "jeeves_commands.lua"
-CHAT_FILE = "jeeves_chat.lua"
+# Filenames the Jeeves Integration mod watches for. These must match
+# COMMAND_FILE / CHAT_FILE in the mod's JeevesCommandServer.lua exactly —
+# the mod polls for these names and silently ignores anything else, so a
+# mismatch means every command written here is never consumed.
+# (jeeves_ranks.lua, written by rank_sync.py, is still .lua on the mod side.)
+COMMAND_FILE = "jeeves_commands.txt"
+CHAT_FILE = "jeeves_chat.txt"
 
 
 def init(bot) -> Path:
@@ -133,7 +137,7 @@ async def _write_file(filepath: Path, lock: asyncio.Lock, content: str, label: s
 
 
 async def write_command(command: str, **kwargs) -> bool:
-    """Write a command to jeeves_commands.lua."""
+    """Write a command to the mod's command file."""
     if _lua_dir is None:
         print("[LuaBridge] ERROR: Not initialized! Call lua_bridge.init(bot) first.")
         return False
@@ -148,7 +152,7 @@ async def write_command(command: str, **kwargs) -> bool:
 
 
 async def write_chat(author: str, message: str) -> bool:
-    """Write a chat relay command to jeeves_chat.lua (dedicated file)."""
+    """Write a chat relay command to the dedicated chat file."""
     if _lua_dir is None:
         print("[LuaBridge] ERROR: Not initialized! Call lua_bridge.init(bot) first.")
         return False
@@ -258,258 +262,130 @@ async def supply_event_status() -> bool:
     """Request supply event status output."""
     return await write_command("supplyeventstatus")
 
-
 # =========================================================================
-# Horde status file reader (server -> bot communication)
+# Status file readers (server -> bot communication)
 # =========================================================================
 
-HORDE_STATUS_FILE = "jeeves_horde_status.lua"
-DROPS_STATUS_FILE = "jeeves_drops_status.lua"
+# The Jeeves server mods write their status files with a .txt extension;
+# older builds used .lua. Look for both and use whichever was written most
+# recently, so a leftover file from an older mod version can't shadow the
+# one the server is actually updating.
+BRIDGE_EXTENSIONS = ('.txt', '.lua')
+
+HORDE_STATUS_FILE = "jeeves_horde_status"
+DROPS_STATUS_FILE = "jeeves_drops_status"
+WORLD_STATUS_FILE = "jeeves_world_status"
+SUPPLY_EVENT_STATUS_FILE = "jeeves_supply_event_status"
+
+
+def resolve_bridge_file(stem: str) -> Optional[Path]:
+    """Return the newest existing bridge file for a stem, or None."""
+    if _lua_dir is None:
+        return None
+
+    newest: Optional[Path] = None
+    newest_mtime = -1.0
+    for ext in BRIDGE_EXTENSIONS:
+        candidate = _lua_dir / (stem + ext)
+        try:
+            mtime = candidate.stat().st_mtime
+        except OSError:
+            continue
+        if mtime > newest_mtime:
+            newest, newest_mtime = candidate, mtime
+    return newest
+
+
+def _parse_flat_table(text: str) -> dict:
+    """Parse a flat Lua table — return { key = value, ... } — into a dict."""
+    inner = text
+    if inner.startswith("return"):
+        inner = inner[6:].strip()
+    if inner.startswith("{"):
+        inner = inner[1:]
+    if inner.endswith("}"):
+        inner = inner[:-1]
+
+    result = {}
+    for line in inner.split('\n'):
+        line = line.strip().rstrip(',')
+        if '=' not in line:
+            continue
+        key, _, val = line.partition('=')
+        key = key.strip()
+        val = val.strip()
+
+        # Parse value types
+        if val.startswith('"') and val.endswith('"'):
+            result[key] = val[1:-1]
+        elif val == "true":
+            result[key] = True
+        elif val == "false":
+            result[key] = False
+        else:
+            try:
+                result[key] = int(val)
+            except ValueError:
+                try:
+                    result[key] = float(val)
+                except ValueError:
+                    result[key] = val
+
+    return result
+
+
+def _read_flat_bridge(stem: str, label: str) -> dict | None:
+    """Read and parse a flat status file written by a Jeeves server mod.
+    Returns the parsed Lua table as a dict, or None if unavailable.
+    Non-async because it's a simple file read."""
+    filepath = resolve_bridge_file(stem)
+    if filepath is None:
+        return None
+
+    try:
+        text = filepath.read_text(encoding='utf-8').strip()
+        if not text:
+            return None
+        result = _parse_flat_table(text)
+        return result if result else None
+    except Exception as e:
+        print(f"[LuaBridge] Failed to read {label}: {e}")
+        return None
 
 
 def read_horde_status() -> dict | None:
-    """Read the horde status file written by JeevesHordesServer.
-    Returns the parsed Lua table as a dict, or None if unavailable.
-    Non-async because it's a simple file read."""
-    if _lua_dir is None:
-        return None
-
-    filepath = _lua_dir / HORDE_STATUS_FILE
-    if not filepath.exists():
-        return None
-
-    try:
-        text = filepath.read_text(encoding='utf-8').strip()
-        if not text:
-            return None
-
-        # Parse simple Lua table: return { key = value, ... }
-        # Strip "return {" and "}"
-        inner = text
-        if inner.startswith("return"):
-            inner = inner[6:].strip()
-        if inner.startswith("{"):
-            inner = inner[1:]
-        if inner.endswith("}"):
-            inner = inner[:-1]
-
-        result = {}
-        for line in inner.split('\n'):
-            line = line.strip().rstrip(',')
-            if '=' not in line:
-                continue
-            key, _, val = line.partition('=')
-            key = key.strip()
-            val = val.strip()
-
-            # Parse value types
-            if val.startswith('"') and val.endswith('"'):
-                result[key] = val[1:-1]
-            elif val == "true":
-                result[key] = True
-            elif val == "false":
-                result[key] = False
-            else:
-                try:
-                    result[key] = int(val)
-                except ValueError:
-                    try:
-                        result[key] = float(val)
-                    except ValueError:
-                        result[key] = val
-
-        return result if result else None
-
-    except Exception as e:
-        print(f"[LuaBridge] Failed to read horde status: {e}")
-        return None
+    """Read the horde status file written by JeevesHordesServer."""
+    return _read_flat_bridge(HORDE_STATUS_FILE, "horde status")
 
 
 def read_drops_status() -> dict | None:
-    """Read the drops status file written by JeevesDropsServer.
-    Returns the parsed Lua table as a dict, or None if unavailable.
-    Non-async because it's a simple file read."""
-    if _lua_dir is None:
-        return None
-
-    filepath = _lua_dir / DROPS_STATUS_FILE
-    if not filepath.exists():
-        return None
-
-    try:
-        text = filepath.read_text(encoding='utf-8').strip()
-        if not text:
-            return None
-
-        inner = text
-        if inner.startswith("return"):
-            inner = inner[6:].strip()
-        if inner.startswith("{"):
-            inner = inner[1:]
-        if inner.endswith("}"):
-            inner = inner[:-1]
-
-        result = {}
-        for line in inner.split('\n'):
-            line = line.strip().rstrip(',')
-            if '=' not in line:
-                continue
-            key, _, val = line.partition('=')
-            key = key.strip()
-            val = val.strip()
-
-            if val.startswith('"') and val.endswith('"'):
-                result[key] = val[1:-1]
-            elif val == "true":
-                result[key] = True
-            elif val == "false":
-                result[key] = False
-            else:
-                try:
-                    result[key] = int(val)
-                except ValueError:
-                    try:
-                        result[key] = float(val)
-                    except ValueError:
-                        result[key] = val
-
-        return result if result else None
-
-    except Exception as e:
-        print(f"[LuaBridge] Failed to read drops status: {e}")
-        return None
-
-
-WORLD_STATUS_FILE = "jeeves_world_status.lua"
-SUPPLY_EVENT_STATUS_FILE = "jeeves_supply_event_status.lua"
+    """Read the drops status file written by JeevesDropsServer."""
+    return _read_flat_bridge(DROPS_STATUS_FILE, "drops status")
 
 
 def read_world_status() -> dict | None:
-    """Read the world status file written by JeevesWorldStatus.lua.
-    Returns the parsed Lua table as a dict, or None if unavailable.
-    Non-async because it's a simple file read."""
-    if _lua_dir is None:
-        return None
-
-    filepath = _lua_dir / WORLD_STATUS_FILE
-    if not filepath.exists():
-        return None
-
-    try:
-        text = filepath.read_text(encoding='utf-8').strip()
-        if not text:
-            return None
-
-        inner = text
-        if inner.startswith("return"):
-            inner = inner[6:].strip()
-        if inner.startswith("{"):
-            inner = inner[1:]
-        if inner.endswith("}"):
-            inner = inner[:-1]
-
-        result = {}
-        for line in inner.split('\n'):
-            line = line.strip().rstrip(',')
-            if '=' not in line:
-                continue
-            key, _, val = line.partition('=')
-            key = key.strip()
-            val = val.strip()
-
-            if val.startswith('"') and val.endswith('"'):
-                result[key] = val[1:-1]
-            elif val == "true":
-                result[key] = True
-            elif val == "false":
-                result[key] = False
-            else:
-                try:
-                    result[key] = int(val)
-                except ValueError:
-                    try:
-                        result[key] = float(val)
-                    except ValueError:
-                        result[key] = val
-
-        return result if result else None
-
-    except Exception as e:
-        print(f"[LuaBridge] Failed to read world status: {e}")
-        return None
+    """Read the world status file written by JeevesWorldStatus."""
+    return _read_flat_bridge(WORLD_STATUS_FILE, "world status")
 
 
 def read_supply_event_status() -> dict | None:
-    """Read the supply event status file written by JeevesDropsSupplyEvents.
-    Returns the parsed Lua table as a dict, or None if unavailable.
-    Non-async because it's a simple file read."""
-    if _lua_dir is None:
-        return None
-
-    filepath = _lua_dir / SUPPLY_EVENT_STATUS_FILE
-    if not filepath.exists():
-        return None
-
-    try:
-        text = filepath.read_text(encoding='utf-8').strip()
-        if not text:
-            return None
-
-        inner = text
-        if inner.startswith("return"):
-            inner = inner[6:].strip()
-        if inner.startswith("{"):
-            inner = inner[1:]
-        if inner.endswith("}"):
-            inner = inner[:-1]
-
-        result = {}
-        for line in inner.split('\n'):
-            line = line.strip().rstrip(',')
-            if '=' not in line:
-                continue
-            key, _, val = line.partition('=')
-            key = key.strip()
-            val = val.strip()
-
-            if val.startswith('"') and val.endswith('"'):
-                result[key] = val[1:-1]
-            elif val == "true":
-                result[key] = True
-            elif val == "false":
-                result[key] = False
-            else:
-                try:
-                    result[key] = int(val)
-                except ValueError:
-                    try:
-                        result[key] = float(val)
-                    except ValueError:
-                        result[key] = val
-
-        return result if result else None
-
-    except Exception as e:
-        print(f"[LuaBridge] Failed to read supply event status: {e}")
-        return None
+    """Read the supply event status file written by JeevesDropsSupplyEvents."""
+    return _read_flat_bridge(SUPPLY_EVENT_STATUS_FILE, "supply event status")
 
 
 # =========================================================================
 # Horde survivor data reader (leaderboard)
 # =========================================================================
 
-SURVIVOR_FILE = "jeeves_horde_survivors.lua"
+SURVIVOR_FILE = "jeeves_horde_survivors"
 
 
 def read_survivor_data() -> dict | None:
     """Read the horde survivor data file written by JeevesHordesServer.
     Returns a dict of { "username": { "mult": float, "survived": int }, ... }
     or None if unavailable. Non-async because it's a simple file read."""
-    if _lua_dir is None:
-        return None
-
-    filepath = _lua_dir / SURVIVOR_FILE
-    if not filepath.exists():
+    filepath = resolve_bridge_file(SURVIVOR_FILE)
+    if filepath is None:
         return None
 
     try:
@@ -566,12 +442,9 @@ def reset_player_survivor(username: str) -> bool:
     """Reset a single player's horde survivor data by editing the bridge file.
     Sets mult=0, survived=0, clears streaks. Works while server is offline.
     Returns True on success, False on failure."""
-    if _lua_dir is None:
-        return False
-
-    filepath = _lua_dir / SURVIVOR_FILE
-    if not filepath.exists():
-        print(f"[LuaBridge] Survivor file not found: {filepath}")
+    filepath = resolve_bridge_file(SURVIVOR_FILE)
+    if filepath is None:
+        print(f"[LuaBridge] Survivor file not found in {_lua_dir}")
         return False
 
     try:
