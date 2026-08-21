@@ -471,6 +471,9 @@ If the server still crashes immediately (within seconds of launching), check:
 ### Mod updates not detecting
 
 - `SERVER_INI_PATH` must point to the correct `.ini` file that contains your `WorkshopItems` list
+- The same file is read for `PauseEmpty`. The status dashboard needs it to tell a paused world
+  (nobody online, simulation halted, mod correctly idle) apart from a mod that has stopped
+  writing. If the file can't be read, the panel says so instead of guessing.
 - Make sure `MODS_FOLDER_PATH` points to the Workshop content folder for PZ (app ID 108600)
 - The Steam API endpoint doesn't require a key but it does rate-limit — if you're getting errors, the bot will retry on the next hourly check
 

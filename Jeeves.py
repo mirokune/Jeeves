@@ -232,13 +232,22 @@ class RCONHelper:
         await self.send_command('quit')
         await asyncio.sleep(8)
 
-    def is_server_online(self, timeout: int = 5) -> bool:
+    def fetch_players(self, timeout: int = 5) -> Optional[str]:
+        """Blocking RCON 'players'. Returns the raw response, or None if unreachable.
+
+        is_server_online() has always run this command and thrown the answer
+        away. A caller that needs both liveness and a current count can have
+        them from the one connection, instead of pairing a fresh probe with a
+        count kept by some other loop on some other clock.
+        """
         try:
             with Client(self.host, self.port, passwd=self.password, timeout=timeout) as client:
-                client.run('players')
-                return True
+                return client.run('players')
         except (socket.timeout, ConnectionRefusedError, OSError):
-            return False
+            return None
+
+    def is_server_online(self, timeout: int = 5) -> bool:
+        return self.fetch_players(timeout) is not None
 
     @staticmethod
     def parse_players(response: str) -> tuple[set, int]:
@@ -414,7 +423,16 @@ class PZBot(commands.Bot):
     Emojis = Emojis
 
     def __init__(self, config: Config):
-        super().__init__(command_prefix="!", intents=discord.Intents.all())
+        # allowed_mentions defaults to none for every send this bot makes.
+        # Nothing here intends to ping anyone — the three member.mention uses
+        # in rank_sync all sit inside embeds, where mentions never notify — so
+        # this costs nothing today and means the next plain-content send() is
+        # safe by default rather than by someone remembering. The relay is why:
+        # in-game chat reached Discord as plain content, and any stranger who
+        # joined the server could @everyone the guild. Sites handling untrusted
+        # text still pass it explicitly, so the guarantee is visible there too.
+        super().__init__(command_prefix="!", intents=discord.Intents.all(),
+                         allowed_mentions=discord.AllowedMentions.none())
         self.config = config
         self.state = ServerState()
         self.rcon = RCONHelper(config)
