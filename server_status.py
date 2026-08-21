@@ -161,8 +161,8 @@ def build_embed(server_online, world, horde, skip_active, stale=False,
         skip_active: Whether next restart is being skipped.
         stale: If True, data is cached from a previous poll (server may be
                temporarily unreachable but we're within the grace period).
-        live_player_count: Player count from RCON, used when the world bridge
-               data is too old to trust.
+        live_player_count: Player count from the last successful RCON poll,
+               or None if that poll failed and the count is unknown.
     """
 
     # World data is only presented as live when the mod wrote it recently.
@@ -171,12 +171,18 @@ def build_embed(server_online, world, horde, skip_active, stale=False,
     world_age = _data_age(world)
     world_fresh = bool(world) and world_age is not None and world_age < WORLD_STALE_SECONDS
 
-    # ...except when the server is online and empty. With PauseEmpty the
+    # ...except when the server is online and nobody is on. With PauseEmpty the
     # simulation halts, OnTick stops firing and the mod stops writing — so the
     # last values are not stale, they are the frozen present. Show them, and
     # say the world is paused rather than crying broken bridge.
+    #
+    # live_player_count is None when the count cannot be trusted — the last
+    # RCON poll failed, so state.player_count still holds whatever was true
+    # before that. An unknown count reads as paused: accusing the mod on the
+    # strength of a number we know is stale is how this warning ended up
+    # standing for hours against an empty server.
     world_paused = (bool(world) and not world_fresh and server_online
-                    and live_player_count == 0)
+                    and not live_player_count)
     world_live = world_fresh or world_paused
 
     if server_online and not stale:
@@ -209,7 +215,9 @@ def build_embed(server_online, world, horde, skip_active, stale=False,
     elif live_player_count is not None:
         player_count = str(live_player_count)
     else:
-        player_count = "0"
+        # No trustworthy source: the world file is frozen and RCON is not
+        # answering. "0" would be a guess dressed up as a fact.
+        player_count = "\u2014"
     embed.add_field(name="\u2b50 Players", value=player_count, inline=True)
 
     restart_str = _next_restart_str(skip_active)
@@ -387,6 +395,17 @@ class ServerStatusCog(commands.Cog):
     def cog_unload(self):
         self.status_loop.cancel()
 
+    def _trusted_player_count(self):
+        """Player count from the last successful RCON poll, or None.
+
+        state.player_count is only written when a poll succeeds, so once RCON
+        stops answering it keeps reporting whoever was on at the time. Callers
+        need to be able to tell "nobody is online" from "we have no idea".
+        """
+        if not self.bot.state.last_rcon_ok:
+            return None
+        return self.bot.state.player_count
+
     def _restart_skipped(self) -> bool:
         """True when the next scheduled restart will not happen — either the
         admin ran /skip, or AutoRestartCog is skipping it because the server
@@ -474,7 +493,7 @@ class ServerStatusCog(commands.Cog):
                 embed = build_embed(True, world or self._last_world,
                                     horde or self._last_horde,
                                     self._restart_skipped(), stale=False,
-                                    live_player_count=self.bot.state.player_count)
+                                    live_player_count=self._trusted_player_count())
             elif bridge_fresh:
                 # RCON failed but bridge files are fresh — server is likely busy
                 self._rcon_fail_count += 1
@@ -486,20 +505,20 @@ class ServerStatusCog(commands.Cog):
                 embed = build_embed(True, world or self._last_world,
                                     horde or self._last_horde,
                                     self._restart_skipped(), stale=True,
-                                    live_player_count=self.bot.state.player_count)
+                                    live_player_count=self._trusted_player_count())
             elif self._rcon_fail_count < OFFLINE_GRACE_COUNT:
                 # RCON failed, bridge stale, but still within grace period
                 self._rcon_fail_count += 1
 
                 embed = build_embed(True, self._last_world, self._last_horde,
                                     self._restart_skipped(), stale=True,
-                                    live_player_count=self.bot.state.player_count)
+                                    live_player_count=self._trusted_player_count())
             else:
                 # Fully offline: RCON failed repeatedly, bridge stale
                 # Still show last known data rather than blanking
                 embed = build_embed(False, self._last_world, self._last_horde,
                                     self._restart_skipped(), stale=False,
-                                    live_player_count=self.bot.state.player_count)
+                                    live_player_count=self._trusted_player_count())
 
             await self._send_or_edit(embed)
 
