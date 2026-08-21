@@ -147,11 +147,76 @@ def _bridge_file_is_fresh(data, max_age=BRIDGE_FRESHNESS_SECONDS):
 
 
 # ============================================================================
+# Server INI
+# ============================================================================
+
+# (path, mtime, value_or_error). The dashboard asks every 30 seconds; keying the
+# cache on mtime means an admin editing the INI is picked up without re-reading
+# the file on every tick.
+_pause_empty_cache = None
+
+
+def _read_pause_empty(ini_path):
+    """Whether the server pauses the simulation when nobody is online.
+
+    Reads the PauseEmpty line from the Project Zomboid server INI — the option
+    the admin panel labels "Pause When Empty". No RCON command reports whether
+    the world is paused right now, so this setting is the only way to know
+    whether an empty server explains a bridge file that stopped being written.
+
+    Raises OSError if the file can't be read and KeyError if the key isn't in
+    it. Either means SERVER_INI_PATH isn't pointing at the server's INI, which
+    is a bigger problem than a quiet bridge file — worth saying out loud rather
+    than papering over with PZ's own default.
+    """
+    global _pause_empty_cache
+
+    if not ini_path:
+        raise OSError("SERVER_INI_PATH is not set")
+
+    # Raises before the cache is consulted, so an INI that goes missing is
+    # noticed on the tick it goes missing rather than on the next edit.
+    mtime = os.path.getmtime(ini_path)
+
+    if _pause_empty_cache is not None:
+        cached_path, cached_mtime, cached = _pause_empty_cache
+        if cached_path == ini_path and cached_mtime == mtime:
+            # A cached miss is stored as its reason, not as the exception
+            # object: re-raising one exception grows its traceback on every
+            # raise, and this path runs every 30 seconds indefinitely.
+            if isinstance(cached, str):
+                raise KeyError(cached)
+            return cached
+
+    value = None
+    # utf-8-sig, not utf-8: a BOM on a Windows-written INI would otherwise
+    # ride along on the first key and stop it matching.
+    with open(ini_path, 'r', encoding='utf-8-sig', errors='replace') as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith('#'):
+                continue
+            key, sep, raw = line.partition('=')
+            if sep and key.strip().lower() == 'pauseempty':
+                value = raw.strip().lower() == 'true'
+                break
+
+    if value is None:
+        reason = f"PauseEmpty not found in {ini_path}"
+        _pause_empty_cache = (ini_path, mtime, reason)
+        raise KeyError(reason)
+
+    _pause_empty_cache = (ini_path, mtime, value)
+    return value
+
+
+# ============================================================================
 # Embed builder
 # ============================================================================
 
 def build_embed(server_online, world, horde, skip_active, stale=False,
-                live_player_count=None):
+                live_player_count=None, rcon_ok=False, pause_empty=None,
+                pause_empty_error=None):
     """Build the status dashboard embed.
 
     Args:
@@ -161,8 +226,13 @@ def build_embed(server_online, world, horde, skip_active, stale=False,
         skip_active: Whether next restart is being skipped.
         stale: If True, data is cached from a previous poll (server may be
                temporarily unreachable but we're within the grace period).
-        live_player_count: Player count from RCON, used when the world bridge
-               data is too old to trust.
+        live_player_count: Player count from the last successful RCON poll,
+               or None if that poll failed and the count is unknown.
+        rcon_ok: Whether RCON answered on *this* tick. Distinct from
+               server_online, which stays True through the grace period.
+        pause_empty: Server's PauseEmpty setting, or None if it couldn't be
+               read from the INI.
+        pause_empty_error: Why PauseEmpty couldn't be read, for the panel.
     """
 
     # World data is only presented as live when the mod wrote it recently.
@@ -171,12 +241,28 @@ def build_embed(server_online, world, horde, skip_active, stale=False,
     world_age = _data_age(world)
     world_fresh = bool(world) and world_age is not None and world_age < WORLD_STALE_SECONDS
 
-    # ...except when the server is online and empty. With PauseEmpty the
+    # ...except when the server pauses on an empty world. With PauseEmpty the
     # simulation halts, OnTick stops firing and the mod stops writing — so the
     # last values are not stale, they are the frozen present. Show them, and
     # say the world is paused rather than crying broken bridge.
-    world_paused = (bool(world) and not world_fresh and server_online
-                    and live_player_count == 0)
+    #
+    # Every term here has to be something we know rather than something we
+    # assume, because world_paused doesn't just silence a warning — it feeds
+    # world_live, which publishes the frozen file as the current state of the
+    # world. Guessing wrong prints stale weather as fact.
+    #
+    #   rcon_ok      — not server_online, which stays True through the grace
+    #                  period. Jeeves and the server share a machine, so a
+    #                  failed RCON means the game isn't running and nothing is
+    #                  paused.
+    #   pause_empty  — read from the INI. A server with PauseEmpty=false and an
+    #                  empty world has a genuinely broken bridge.
+    #   count == 0   — a confirmed zero from this tick's own RCON call. The
+    #                  earlier `not live_player_count` also passed None, so an
+    #                  unknown count read as paused and the panel claimed a
+    #                  pause through outages where players were online.
+    world_paused = (bool(world) and not world_fresh and rcon_ok
+                    and pause_empty is True and live_player_count == 0)
     world_live = world_fresh or world_paused
 
     if server_online and not stale:
@@ -209,7 +295,9 @@ def build_embed(server_online, world, horde, skip_active, stale=False,
     elif live_player_count is not None:
         player_count = str(live_player_count)
     else:
-        player_count = "0"
+        # No trustworthy source: the world file is frozen and RCON is not
+        # answering. "0" would be a guess dressed up as a fact.
+        player_count = "\u2014"
     embed.add_field(name="\u2b50 Players", value=player_count, inline=True)
 
     restart_str = _next_restart_str(skip_active)
@@ -285,7 +373,21 @@ def build_embed(server_online, world, horde, skip_active, stale=False,
     embed.add_field(name="\U0001f9df Status", value=horde_status, inline=True)
     embed.add_field(name="\U0001f3c6 Completed", value=horde_completed, inline=True)
 
-    if not world_live:
+    # At most one warning field — name the root cause, not every symptom.
+    if pause_empty is None:
+        # Can't read the INI, so a paused world and a dead bridge look alike.
+        # Say that, rather than picking one and asserting it.
+        embed.add_field(
+            name="\u26a0\ufe0f Server Config",
+            value=(f"Can't read `PauseEmpty` from the server INI — "
+                   f"{pause_empty_error or 'reason unknown'}. Check "
+                   f"`SERVER_INI_PATH`; until it resolves, a paused world "
+                   f"can't be told apart from a broken bridge."),
+            inline=False,
+        )
+    elif rcon_ok and not world_live:
+        # rcon_ok gates this: with the server down, a mod that isn't writing is
+        # not news on top of an already-red panel.
         if world:
             detail = f"No update in {_format_age(world_age)}"
         else:
@@ -378,6 +480,11 @@ class ServerStatusCog(commands.Cog):
         self._last_world = None
         self._last_horde = None
 
+        # Last (value, error) printed for PauseEmpty. The empty tuple never
+        # equals a real pair, so the first read always logs; after that only
+        # changes do, since this is consulted every 30 seconds.
+        self._pause_empty_logged = ()
+
         if not self._channel_id:
             print("[ServerStatus] WARNING: STATUS_CHANNEL_ID not set. Dashboard disabled.")
         else:
@@ -386,6 +493,29 @@ class ServerStatusCog(commands.Cog):
 
     def cog_unload(self):
         self.status_loop.cancel()
+
+    def _pause_empty(self):
+        """(value, error) for the server's PauseEmpty setting.
+
+        value is True/False, or None when the INI couldn't be read — in which
+        case error says why, in words short enough for the panel.
+        """
+        ini_path = getattr(self.bot.config, 'SERVER_INI_PATH', None)
+        try:
+            value, error = _read_pause_empty(ini_path), None
+        except KeyError as e:
+            value, error = None, str(e.args[0])
+        except OSError as e:
+            value, error = None, f"{type(e).__name__}: {e}"
+
+        if (value, error) != self._pause_empty_logged:
+            if error:
+                print(f"[ServerStatus] Cannot determine PauseEmpty: {error}")
+            else:
+                print(f"[ServerStatus] PauseEmpty={value} (from {ini_path})")
+            self._pause_empty_logged = (value, error)
+
+        return value, error
 
     def _restart_skipped(self) -> bool:
         """True when the next scheduled restart will not happen — either the
@@ -448,11 +578,32 @@ class ServerStatusCog(commands.Cog):
     async def status_loop(self):
         try:
             # --- 1. Probe RCON ---
-            # is_server_online() is a blocking socket call (up to 5s), so run it
+            # fetch_players() is a blocking socket call (up to 5s), so run it
             # off the event loop — otherwise every tick stalls chat relay,
             # slash commands and the gateway heartbeat.
-            rcon_ok = self.bot.state.server_ready and await asyncio.to_thread(
-                self.bot.rcon.is_server_online)
+            #
+            # It runs the same 'players' command the old is_server_online()
+            # probe ran, but keeps the answer, so liveness and the count come
+            # from one connection at one instant. state.player_count is written
+            # by a 60s heartbeat that returns early during restarts, so through
+            # a restart it reports a frozen number as a current one.
+            players_raw = None
+            if self.bot.state.server_ready:
+                players_raw = await asyncio.to_thread(self.bot.rcon.fetch_players)
+            rcon_ok = players_raw is not None
+
+            # parse_players reads its count from the "Players connected (N)"
+            # header and its names from the "-name" lines. If that header is
+            # ever absent or reworded the count parses as 0 while the names are
+            # still there — and a false zero is the one error that matters
+            # here, since it asserts a pause with players online. Take
+            # whichever source says more.
+            tick_count = None
+            if rcon_ok:
+                names, header_count = self.bot.rcon.parse_players(players_raw)
+                tick_count = max(header_count, len(names))
+
+            pause_empty, pause_empty_error = self._pause_empty()
 
             # --- 2. Read Lua bridge files ---
             world = lua_bridge.read_world_status()
@@ -474,9 +625,20 @@ class ServerStatusCog(commands.Cog):
                 embed = build_embed(True, world or self._last_world,
                                     horde or self._last_horde,
                                     self._restart_skipped(), stale=False,
-                                    live_player_count=self.bot.state.player_count)
+                                    live_player_count=tick_count,
+                                    rcon_ok=True, pause_empty=pause_empty,
+                                    pause_empty_error=pause_empty_error)
             elif bridge_fresh:
-                # RCON failed but bridge files are fresh — server is likely busy
+                # RCON failed but bridge files are fresh — server is likely busy.
+                #
+                # live_player_count is None in this branch and the two below it:
+                # RCON failed *this tick*, so there is no current count. The old
+                # fallback read state.player_count whenever state.last_rcon_ok
+                # was True, but that flag is written by a 60s heartbeat which
+                # returns early during restarts — so through a restart it stayed
+                # True over a frozen count, and the panel showed the players who
+                # had been kicked. None renders as an em dash, which is the
+                # honest answer.
                 self._rcon_fail_count += 1
                 if world:
                     self._last_world = world
@@ -486,20 +648,26 @@ class ServerStatusCog(commands.Cog):
                 embed = build_embed(True, world or self._last_world,
                                     horde or self._last_horde,
                                     self._restart_skipped(), stale=True,
-                                    live_player_count=self.bot.state.player_count)
+                                    live_player_count=None,
+                                    rcon_ok=False, pause_empty=pause_empty,
+                                    pause_empty_error=pause_empty_error)
             elif self._rcon_fail_count < OFFLINE_GRACE_COUNT:
                 # RCON failed, bridge stale, but still within grace period
                 self._rcon_fail_count += 1
 
                 embed = build_embed(True, self._last_world, self._last_horde,
                                     self._restart_skipped(), stale=True,
-                                    live_player_count=self.bot.state.player_count)
+                                    live_player_count=None,
+                                    rcon_ok=False, pause_empty=pause_empty,
+                                    pause_empty_error=pause_empty_error)
             else:
                 # Fully offline: RCON failed repeatedly, bridge stale
                 # Still show last known data rather than blanking
                 embed = build_embed(False, self._last_world, self._last_horde,
                                     self._restart_skipped(), stale=False,
-                                    live_player_count=self.bot.state.player_count)
+                                    live_player_count=None,
+                                    rcon_ok=False, pause_empty=pause_empty,
+                                    pause_empty_error=pause_empty_error)
 
             await self._send_or_edit(embed)
 

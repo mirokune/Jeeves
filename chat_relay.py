@@ -121,9 +121,25 @@ class ChatRelay(commands.Cog):
         return 0
 
     def _format_message(self, chat_type: str, author: str, text: str) -> str:
-        """Format a chat message for Discord with ANSI rank colors."""
+        """Format a chat message for Discord with ANSI rank colors.
+
+        Both fields come from whoever is standing in the game world, and this
+        is the only place in the bot where such text reaches Discord as plain
+        message content — everything else goes out inside an embed, where
+        markdown is inert. So it gets neutralised here.
+        """
         rank = self._get_rank_for_author(author)
         ansi_code = ANSI_COLORS.get(rank)
+
+        # A backtick in either field closes the ansi block early and drops the
+        # remainder into live markdown, which is how a ranked player's message
+        # would escape the fence that normally makes it inert.
+        author = author.replace('`', "'")
+        text = text.replace('`', "'")
+
+        # Names are decoration, never markup: without this a player called
+        # `Kyle]**: new IP in DMs** [x` forges a line from another speaker.
+        author = discord.utils.escape_markdown(author)
 
         if ansi_code:
             # Use ANSI code block for colored name
@@ -220,7 +236,13 @@ class ChatRelay(commands.Cog):
                 msg = self._format_message(chat_type, clean_author, message_text)
 
                 try:
-                    await channel.send(msg)
+                    # Mentions still render; they just stop notifying. Without
+                    # this, anyone who can join the game server can ping the
+                    # Discord — confirmed live with @everyone, which needs no
+                    # user ID and resolves straight out of message content.
+                    await channel.send(
+                        msg, allowed_mentions=discord.AllowedMentions.none()
+                    )
                 except discord.HTTPException as e:
                     print(f"[ChatRelay] Discord send error: {e}")
 
